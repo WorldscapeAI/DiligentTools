@@ -50,6 +50,12 @@ enum HOT_KEY_FLAGS : Uint32
 };
 DEFINE_FLAG_ENUM_OPERATORS(HOT_KEY_FLAGS)
 
+
+struct AppPerfStats
+{
+    double gpu_time_ms;
+};
+
 /// Base class for native applications. Platform-specific classes
 /// such as Win32AppBase, LinuxAppBase are inherited from AppBase.
 class AppBase
@@ -182,6 +188,9 @@ public:
     {
         return HOT_KEY_FLAG_ALL;
     }
+
+    /// Returns the hot key handling flags
+    virtual AppPerfStats GetAppPerfStats() const = 0;
 };
 
 } // namespace Diligent

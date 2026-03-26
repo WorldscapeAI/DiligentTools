@@ -157,9 +157,11 @@ int WINAPI WinMain(_In_ HINSTANCE     hInstance,
 
                 double filterScale = 0.2;
                 filteredFrameTime  = filteredFrameTime * (1.0 - filterScale) + filterScale * ElapsedTime;
+                AppPerfStats appStats = g_pTheApp->GetAppPerfStats();
                 std::stringstream fpsCounterSS;
-                fpsCounterSS << AppTitle << " - " << std::fixed << std::setprecision(1) << filteredFrameTime * 1000;
-                fpsCounterSS << " ms (" << 1.0 / filteredFrameTime << " fps)";
+                fpsCounterSS << AppTitle << " - cpu: " << std::fixed << std::setprecision(1) << filteredFrameTime * 1000 << " ms ";
+                fpsCounterSS << " - gpu: " << std::fixed << std::setprecision(1) << appStats.gpu_time_ms << " ms ";
+                fpsCounterSS << " - fps: " << 1.0 / filteredFrameTime;
                 SetWindowTextA(wnd, fpsCounterSS.str().c_str());
             }
         }
