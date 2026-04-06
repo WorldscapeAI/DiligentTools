@@ -1,5 +1,5 @@
 /*
- *  Copyright 2019-2024 Diligent Graphics LLC
+ *  Copyright 2019-2026 Diligent Graphics LLC
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -63,7 +63,29 @@ struct BufferInitData : ObjectBase<IObject>
 
     IMPLEMENT_QUERY_INTERFACE_IN_PLACE(IID_BufferInitData, ObjectBase)
 
-    std::vector<std::vector<Uint8>> Data;
+    // The status of the asynchronous copy operation scheduled with GPU upload manager.
+    enum class AsyncCopyStatus : Uint8
+    {
+        Disabled, // GPU upload manager not used
+        Pending,  // Scheduled, not yet enqueued
+        Enqueued, // Enqueued into command stream
+    };
+    struct ChunkData
+    {
+        std::vector<Uint8> Bytes;
+        AsyncCopyStatus    CopyStatus = AsyncCopyStatus::Disabled;
+    };
+    std::vector<ChunkData> Chunks;
+
+    void Add(std::vector<Uint8> Bytes)
+    {
+        Chunks.push_back({std::move(Bytes), AsyncCopyStatus::Disabled});
+    }
+
+    void Reserve(size_t NumChunks)
+    {
+        Chunks.reserve(NumChunks);
+    }
 };
 
 class ModelBuilder
@@ -444,6 +466,8 @@ Mesh* ModelBuilder::LoadMesh(const GltfModelType& GltfModel,
         if (GltfPrimitive.GetIndicesId() >= 0)
         {
             IndexCount = ConvertIndexData(GltfModel, GltfPrimitive.GetIndicesId(), VertexStart);
+            // Vertex offset is baked into the indices
+            VertexStart = 0;
         }
 
         int MaterialId = GltfPrimitive.GetMaterialId();
@@ -460,6 +484,7 @@ Mesh* ModelBuilder::LoadMesh(const GltfModelType& GltfModel,
         NewMesh.Primitives.emplace_back(
             IndexStart,
             IndexCount,
+            VertexStart,
             VertexCount,
             static_cast<Uint32>(MaterialId),
             PosMin,

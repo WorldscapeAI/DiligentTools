@@ -1,5 +1,5 @@
 /*
- *  Copyright 2019-2023 Diligent Graphics LLC
+ *  Copyright 2019-2025 Diligent Graphics LLC
  *  Copyright 2015-2019 Egor Yusov
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
@@ -27,6 +27,9 @@
 
 #pragma once
 
+/// \file
+/// Defines Diligent::ImGuiImplDiligent class implementing ImGui renderer for Diligent Engine.
+
 #include <memory>
 #include "../../../DiligentCore/Primitives/interface/BasicTypes.h"
 
@@ -43,9 +46,9 @@ class ImGuiDiligentRenderer;
 
 /// Conversion mode to apply to imgui colors.
 ///
-/// \remarks    Imgui colors are defined in sRGB space.
-///             Depending on the use case, they may need
-///             to be converted to linear space.
+/// Imgui colors are defined in sRGB space.
+/// Depending on the use case, they may need
+/// to be converted to linear space.
 enum IMGUI_COLOR_CONVERSION_MODE : Uint8
 {
     /// Select the color conversion mode automatically:
@@ -83,6 +86,7 @@ struct ImGuiDiligentCreateInfo
                             const SwapChainDesc& _SCDesc) noexcept;
 };
 
+/// ImGui renderer for Diligent Engine.
 class ImGuiImplDiligent
 {
 public:
@@ -115,8 +119,6 @@ public:
     // Use if you want to reset your rendering device without losing ImGui state.
     void InvalidateDeviceObjects();
     void CreateDeviceObjects();
-
-    void UpdateFontsTexture();
 
 protected:
     std::unique_ptr<ImGuiDiligentRenderer> m_pRenderer;

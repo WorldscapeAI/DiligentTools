@@ -1,5 +1,5 @@
 /*
- *  Copyright 2019-2024 Diligent Graphics LLC
+ *  Copyright 2019-2025 Diligent Graphics LLC
  *  Copyright 2015-2019 Egor Yusov
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
@@ -30,9 +30,7 @@
 #include "Errors.hpp"
 #include "HLSL2GLSLConverter.h"
 #include "RefCntAutoPtr.hpp"
-#include "Errors.hpp"
 #include "EngineFactoryOpenGL.h"
-#include "RefCntAutoPtr.hpp"
 #include "DataBlobImpl.hpp"
 #include "FileWrapper.hpp"
 #include "args.hxx"
@@ -42,16 +40,11 @@ namespace Diligent
 
 HLSL2GLSLConverterApp::HLSL2GLSLConverterApp()
 {
-#if EXPLICITLY_LOAD_ENGINE_GL_DLL
-    // Declare function pointer
-    auto GetEngineFactoryOpenGL = LoadGraphicsEngineOpenGL();
-    if (GetEngineFactoryOpenGL == nullptr)
+    m_pFactoryGL = LoadAndGetEngineFactoryOpenGL();
+    if (m_pFactoryGL == nullptr)
     {
         LOG_ERROR_MESSAGE("Failed to load OpenGL engine implementation");
-        return -1;
     }
-#endif
-    m_pFactoryGL = GetEngineFactoryOpenGL();
 }
 
 int HLSL2GLSLConverterApp::ParseCmdLine(int argc, char** argv)
@@ -119,7 +112,7 @@ int HLSL2GLSLConverterApp::ParseCmdLine(int argc, char** argv)
 
     m_InputPath  = InputArg.Get();
     m_OutputPath = OutputArg.Get();
-    for (const auto& Dir : SearDirsArg.Get())
+    for (const std::string& Dir : SearDirsArg.Get())
     {
         if (!m_SearchDirectories.empty())
             m_SearchDirectories.push_back(';');
@@ -162,10 +155,10 @@ int HLSL2GLSLConverterApp::Convert(IRenderDevice* pDevice)
     {
         return -1;
     }
-    auto pHLSLSourceBlob = DataBlobImpl::Create();
+    RefCntAutoPtr<DataBlobImpl> pHLSLSourceBlob = DataBlobImpl::Create();
     pInputFileStream->ReadBlob(pHLSLSourceBlob);
     char* HLSLSource = pHLSLSourceBlob->GetDataPtr<char>();
-    auto  SourceLen  = static_cast<Int32>(pHLSLSourceBlob->GetSize());
+    Int32 SourceLen  = static_cast<Int32>(pHLSLSourceBlob->GetSize());
 
     RefCntAutoPtr<IHLSL2GLSLConverter> pConverter;
     CreateHLSL2GLSLConverter(&pConverter);

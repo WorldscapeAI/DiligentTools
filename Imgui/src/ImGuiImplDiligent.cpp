@@ -1,5 +1,5 @@
 /*
- *  Copyright 2019-2023 Diligent Graphics LLC
+ *  Copyright 2019-2025 Diligent Graphics LLC
  *  Copyright 2015-2019 Egor Yusov
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
@@ -63,6 +63,7 @@ ImGuiImplDiligent::ImGuiImplDiligent(const ImGuiDiligentCreateInfo& CI)
 
 ImGuiImplDiligent::~ImGuiImplDiligent()
 {
+    m_pRenderer->InvalidateDeviceObjects();
     ImGui::DestroyContext();
 }
 
@@ -93,11 +94,6 @@ void ImGuiImplDiligent::InvalidateDeviceObjects()
 void ImGuiImplDiligent::CreateDeviceObjects()
 {
     m_pRenderer->CreateDeviceObjects();
-}
-
-void ImGuiImplDiligent::UpdateFontsTexture()
-{
-    m_pRenderer->CreateFontsTexture();
 }
 
 } // namespace Diligent

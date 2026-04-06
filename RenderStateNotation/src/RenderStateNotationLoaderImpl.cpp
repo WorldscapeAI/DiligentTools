@@ -1,5 +1,5 @@
 /*
- *  Copyright 2019-2024 Diligent Graphics LLC
+ *  Copyright 2019-2025 Diligent Graphics LLC
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -295,7 +295,7 @@ void RenderStateNotationLoaderImpl::LoadPipelineState(const LoadPipelineStateInf
             }
 
             if (LoadInfo.AddToCache)
-                m_PipelineStateCache[std::make_pair(HashMapStringKey{pPipeline->GetDesc().Name, false}, pPipeline->GetDesc().PipelineType)] = pPipeline;
+                m_PipelineStateCache[std::make_pair(HashMapStringKey{LoadInfo.Name, false}, LoadInfo.PipelineType)] = pPipeline;
         }
 
         *ppPSO = pPipeline.Detach();
@@ -462,7 +462,7 @@ void CreateRenderStateNotationLoader(const RenderStateNotationLoaderCreateInfo& 
     {
         RefCntAutoPtr<IRenderStateNotationLoader> pLoader{MakeNewRCObj<RenderStateNotationLoaderImpl>()(CreateInfo)};
         if (pLoader)
-            pLoader->QueryInterface(IID_RenderStateNotationLoader, reinterpret_cast<IObject**>(ppLoader));
+            pLoader->QueryInterface(IID_RenderStateNotationLoader, ppLoader);
     }
     catch (...)
     {

@@ -17,6 +17,7 @@
 #include "imgui_impl_osx_v1.85.h"
 #import <Cocoa/Cocoa.h>
 #include <mach/mach_time.h>
+#include <vector>
 
 // CHANGELOG
 // (minor and older changes stripped away, please see git history for details)
@@ -39,12 +40,15 @@
 @class ImFocusObserver;
 
 // Data
-static double         g_Time = 0.0;
-static NSCursor*      g_MouseCursors[ImGuiMouseCursor_COUNT] = {};
-static bool           g_MouseCursorHidden = false;
-static bool           g_MouseJustPressed[ImGuiMouseButton_COUNT] = {};
-static bool           g_MouseDown[ImGuiMouseButton_COUNT] = {};
+static double    g_Time = 0.0;
+static NSCursor* g_MouseCursors[ImGuiMouseCursor_COUNT] = {};
+static bool      g_MouseCursorHidden = false;
+static bool      g_MouseJustPressed[ImGuiMouseButton_COUNT] = {};
+static bool      g_MouseDown[ImGuiMouseButton_COUNT] = {};
+
 static ImFocusObserver* g_FocusObserver = NULL;
+
+static std::vector<ImGuiKey> g_KeysPressedWithCmd;
 
 // Undocumented methods for creating cursors.
 @interface NSCursor()
@@ -62,8 +66,9 @@ static CFTimeInterval GetMachAbsoluteTimeInSeconds()
 static void resetKeys()
 {
     ImGuiIO& io = ImGui::GetIO();
-    memset(io.KeysDown, 0, sizeof(io.KeysDown));
+    io.ClearInputKeys();
     io.KeyCtrl = io.KeyShift = io.KeyAlt = io.KeySuper = false;
+    g_KeysPressedWithCmd.clear();
 }
 
 @interface ImFocusObserver : NSObject
@@ -105,31 +110,6 @@ bool ImGui_ImplOSX_Init()
     //io.BackendFlags |= ImGuiBackendFlags_PlatformHasViewports;    // We can create multi-viewports on the Platform side (optional)
     //io.BackendFlags |= ImGuiBackendFlags_HasMouseHoveredViewport; // We can set io.MouseHoveredViewport correctly (optional, not easy)
     io.BackendPlatformName = "imgui_impl_osx";
-
-    // Keyboard mapping. Dear ImGui will use those indices to peek into the io.KeyDown[] array.
-    const int offset_for_function_keys = 256 - 0xF700;
-    io.KeyMap[ImGuiKey_Tab]             = '\t';
-    io.KeyMap[ImGuiKey_LeftArrow]       = NSLeftArrowFunctionKey + offset_for_function_keys;
-    io.KeyMap[ImGuiKey_RightArrow]      = NSRightArrowFunctionKey + offset_for_function_keys;
-    io.KeyMap[ImGuiKey_UpArrow]         = NSUpArrowFunctionKey + offset_for_function_keys;
-    io.KeyMap[ImGuiKey_DownArrow]       = NSDownArrowFunctionKey + offset_for_function_keys;
-    io.KeyMap[ImGuiKey_PageUp]          = NSPageUpFunctionKey + offset_for_function_keys;
-    io.KeyMap[ImGuiKey_PageDown]        = NSPageDownFunctionKey + offset_for_function_keys;
-    io.KeyMap[ImGuiKey_Home]            = NSHomeFunctionKey + offset_for_function_keys;
-    io.KeyMap[ImGuiKey_End]             = NSEndFunctionKey + offset_for_function_keys;
-    io.KeyMap[ImGuiKey_Insert]          = NSInsertFunctionKey + offset_for_function_keys;
-    io.KeyMap[ImGuiKey_Delete]          = NSDeleteFunctionKey + offset_for_function_keys;
-    io.KeyMap[ImGuiKey_Backspace]       = 127;
-    io.KeyMap[ImGuiKey_Space]           = 32;
-    io.KeyMap[ImGuiKey_Enter]           = 13;
-    io.KeyMap[ImGuiKey_Escape]          = 27;
-    io.KeyMap[ImGuiKey_KeyPadEnter]     = 3;
-    io.KeyMap[ImGuiKey_A]               = 'A';
-    io.KeyMap[ImGuiKey_C]               = 'C';
-    io.KeyMap[ImGuiKey_V]               = 'V';
-    io.KeyMap[ImGuiKey_X]               = 'X';
-    io.KeyMap[ImGuiKey_Y]               = 'Y';
-    io.KeyMap[ImGuiKey_Z]               = 'Z';
 
     // Load cursors. Some of them are undocumented.
     g_MouseCursorHidden = false;
@@ -247,19 +227,61 @@ void ImGui_ImplOSX_NewFrame(NSView* view)
     g_Time = current_time;
 
     ImGui_ImplOSX_UpdateMouseCursorAndButtons();
+    
+    // Generate KeyUp event for all keys pressed while Cmd was pressed.
+    for (ImGuiKey key : g_KeysPressedWithCmd)
+    {
+        io.AddKeyEvent(key, false);
+    }
+    g_KeysPressedWithCmd.clear();
 }
 
-static int mapCharacterToKey(int c)
+static ImGuiKey mapCharacterToKey(int c)
 {
     if (c >= 'a' && c <= 'z')
-        return c - 'a' + 'A';
-    if (c == 25) // SHIFT+TAB -> TAB
-        return 9;
-    if (c >= 0 && c < 256)
-        return c;
-    if (c >= 0xF700 && c < 0xF700 + 256)
-        return c - 0xF700 + 256;
-    return -1;
+        return (ImGuiKey)(ImGuiKey_A + (c - 'a'));
+    if (c >= 'A' && c <= 'Z')
+        return (ImGuiKey)(ImGuiKey_A + (c - 'A'));
+    if (c >= '0' && c <= '9')
+        return (ImGuiKey)(ImGuiKey_0 + (c - '0'));
+
+    switch (c)
+    {
+        case 9:    return ImGuiKey_Tab;
+        case 13:   return ImGuiKey_Enter;
+        case 27:   return ImGuiKey_Escape;
+        case 127:  return ImGuiKey_Backspace;
+        case 25:   return ImGuiKey_Tab; // Shift+Tab workaround
+    }
+
+    // macOS NSEvent function keys (0xF700+)
+    switch (c)
+    {
+        case 0xF700: return ImGuiKey_UpArrow;
+        case 0xF701: return ImGuiKey_DownArrow;
+        case 0xF702: return ImGuiKey_LeftArrow;
+        case 0xF703: return ImGuiKey_RightArrow;
+
+        case 0xF704: return ImGuiKey_F1;
+        case 0xF705: return ImGuiKey_F2;
+        case 0xF706: return ImGuiKey_F3;
+        case 0xF707: return ImGuiKey_F4;
+        case 0xF708: return ImGuiKey_F5;
+        case 0xF709: return ImGuiKey_F6;
+        case 0xF70A: return ImGuiKey_F7;
+        case 0xF70B: return ImGuiKey_F8;
+        case 0xF70C: return ImGuiKey_F9;
+        case 0xF70D: return ImGuiKey_F10;
+        case 0xF70E: return ImGuiKey_F11;
+        case 0xF70F: return ImGuiKey_F12;
+
+        case 0xF729: return ImGuiKey_Home;
+        case 0xF72B: return ImGuiKey_End;
+        case 0xF72C: return ImGuiKey_PageUp;
+        case 0xF72D: return ImGuiKey_PageDown;
+    }
+
+    return ImGuiKey_None;
 }
 
 bool ImGui_ImplOSX_HandleEvent(NSEvent* event, NSView* view)
@@ -331,13 +353,20 @@ bool ImGui_ImplOSX_HandleEvent(NSEvent* event, NSView* view)
             if (!io.KeySuper && !(c >= 0xF700 && c <= 0xFFFF) && c != 127)
                 io.AddInputCharacter((unsigned int)c);
 
-            // We must reset in case we're pressing a sequence of special keys while keeping the command pressed
-            int key = mapCharacterToKey(c);
-            if (key != -1 && key < 256 && !io.KeySuper)
-                resetKeys();
-            if (key != -1)
-                io.KeysDown[key] = true;
+            ImGuiKey key = mapCharacterToKey(c);
+            if (key != ImGuiKey_None)
+            {
+                io.AddKeyEvent(key, true);
+                
+                // NB: AddKeyEvent swaps Ctrl and Cmd (aka Super) on Mac
+                if (io.KeyCtrl)
+                {
+                    // MacOS does not generate KeyUp event when Cmd is pressed.
+                    g_KeysPressedWithCmd.push_back(key);
+                }
+            }
         }
+        
         return io.WantCaptureKeyboard;
     }
 
@@ -348,9 +377,11 @@ bool ImGui_ImplOSX_HandleEvent(NSEvent* event, NSView* view)
         for (NSUInteger i = 0; i < len; i++)
         {
             int c = [str characterAtIndex:i];
-            int key = mapCharacterToKey(c);
-            if (key != -1)
-                io.KeysDown[key] = false;
+            ImGuiKey key = mapCharacterToKey(c);
+            if (key != ImGuiKey_None)
+            {
+                io.AddKeyEvent(key, false);
+            }
         }
         return io.WantCaptureKeyboard;
     }
@@ -359,18 +390,26 @@ bool ImGui_ImplOSX_HandleEvent(NSEvent* event, NSView* view)
     {
         unsigned int flags = [event modifierFlags] & NSEventModifierFlagDeviceIndependentFlagsMask;
 
-        bool oldKeyCtrl = io.KeyCtrl;
+        bool oldKeyCtrl  = io.KeyCtrl;
         bool oldKeyShift = io.KeyShift;
-        bool oldKeyAlt = io.KeyAlt;
+        bool oldKeyAlt   = io.KeyAlt;
         bool oldKeySuper = io.KeySuper;
-        io.KeyCtrl      = flags & NSEventModifierFlagControl;
-        io.KeyShift     = flags & NSEventModifierFlagShift;
-        io.KeyAlt       = flags & NSEventModifierFlagOption;
-        io.KeySuper     = flags & NSEventModifierFlagCommand;
+        
+        bool KeyCtrl  = flags & NSEventModifierFlagControl;
+        bool KeyShift = flags & NSEventModifierFlagShift;
+        bool KeyAlt   = flags & NSEventModifierFlagOption;
+        bool KeySuper = flags & NSEventModifierFlagCommand;
 
-        // We must reset them as we will not receive any keyUp event if they where pressed with a modifier
+        // NB: AddKeyEvent swaps Ctrl and Cmd (aka Super) on Mac
+        io.AddKeyEvent(ImGuiKey_ModCtrl, KeyCtrl);
+        io.AddKeyEvent(ImGuiKey_ModShift, KeyShift);
+        io.AddKeyEvent(ImGuiKey_ModAlt, KeyAlt);
+        io.AddKeyEvent(ImGuiKey_ModSuper, KeySuper);
+        
+        // We must reset keys as we will not receive any keyUp event if they where pressed with a modifier
         if ((oldKeyShift && !io.KeyShift) || (oldKeyCtrl && !io.KeyCtrl) || (oldKeyAlt && !io.KeyAlt) || (oldKeySuper && !io.KeySuper))
             resetKeys();
+        
         return io.WantCaptureKeyboard;
     }
 

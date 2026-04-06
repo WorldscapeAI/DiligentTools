@@ -1,5 +1,5 @@
 /*
- *  Copyright 2019-2024 Diligent Graphics LLC
+ *  Copyright 2019-2026 Diligent Graphics LLC
  *  Copyright 2015-2019 Egor Yusov
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
@@ -27,7 +27,10 @@
 
 #pragma once
 
-#include <mutex>
+/// \file
+/// Defines Diligent::ResourceManager class implementing GLTF resource manager.
+
+#include <shared_mutex>
 #include <vector>
 #include <unordered_map>
 #include <atomic>
@@ -53,15 +56,14 @@ public:
     using TBase = ObjectBase<IObject>;
 
     /// Vertex layout key used to select the vertex pool.
-    ///
-    /// \remarks
-    ///     When vertex data is split between multiple buffers, the offsets in each buffer must be
-    ///     consistent. For example, suppose we store position in buffer 0 (12 bytes) and normals + UVs
-    ///     in buffer 1 (20 bytes).
-    ///     If the the first allocation contains 100 vertices, the offsets for the second allocation will be
-    ///     1200 and 2000 bytes correspondingly.
-    ///     If these offsets are not consistent, the vertex shader will read incorrect data.
-    ///     Vertex layout key is used to group compatible layouts in the same vertex pool.
+
+    /// When vertex data is split between multiple buffers, the offsets in each buffer must be
+    /// consistent. For example, suppose we store position in buffer 0 (12 bytes) and normals + UVs
+    /// in buffer 1 (20 bytes).
+    /// If the the first allocation contains 100 vertices, the offsets for the second allocation will be
+    /// 1200 and 2000 bytes correspondingly.
+    /// If these offsets are not consistent, the vertex shader will read incorrect data.
+    /// Vertex layout key is used to group compatible layouts in the same vertex pool.
     struct VertexLayoutKey
     {
         struct ElementDesc
@@ -97,10 +99,6 @@ public:
         bool operator!=(const VertexLayoutKey& rhs) const
         {
             return Elements != rhs.Elements;
-        }
-        explicit operator bool() const
-        {
-            return Elements.empty();
         }
 
         struct Hasher
@@ -148,9 +146,14 @@ public:
         /// The number of elements in pTexAtlasCIs array.
         Uint32 NumTexAtlases = 0;
 
+        /// The number of shards in texture allocation map.
+        /// Shards are used to reduce contention when allocating texture space and finding texture allocations by cache ID
+        /// from multiple threads simultaneously. The more shards, the less contention, but the more memory is used by the map.
+        Uint32 NumTextureAllocationShards = 1;
+
         /// Default texture atlas description that is used to create texture
         /// atlas not explicitly specified in pTexAtlasCIs.
-        /// If DefaultAtlasDesc.Desc.Type is RESOURCE_DIM_UNDEFINED,
+        /// If DefaultAtlasDesc.Desc.Type is Diligent::RESOURCE_DIM_UNDEFINED,
         /// additional atlases will not be created.
         DynamicTextureAtlasCreateInfo DefaultAtlasDesc;
 
@@ -173,9 +176,12 @@ public:
     /// \param[in]  CacheId   - Optional cache ID.
     /// \param[in]  pUserData - Optional user data to set in the texture atlas suballocation.
     ///
-    /// \remarks    If the texture atlas for the given format does not exist and if the default
-    ///             atlas description allows creating new atlases (Desc.Type != RESOURCE_DIM_UNDEFINED),
-    ///             new atlas will be added. Otherwise, the function will return null.
+    /// If the texture atlas for the given format does not exist and if the default
+    /// atlas description allows creating new atlases (Desc.Type != Diligent::RESOURCE_DIM_UNDEFINED),
+    /// new atlas will be added. Otherwise, the function will return null.
+    ///
+    /// The function is thread-safe and can be called from multiple threads simultaneously and
+    /// in parallel with other thread-safe class methods.
     RefCntAutoPtr<ITextureAtlasSuballocation> AllocateTextureSpace(TEXTURE_FORMAT Fmt,
                                                                    Uint32         Width,
                                                                    Uint32         Height,
@@ -183,9 +189,15 @@ public:
                                                                    IObject*       pUserData = nullptr);
 
     /// Finds texture allocation in the texture atlas that matches the specified cache ID.
+    ///
+    /// The function is thread-safe and can be called from multiple threads simultaneously and
+    /// in parallel with other thread-safe class methods.
     RefCntAutoPtr<ITextureAtlasSuballocation> FindTextureAllocation(const char* CacheId);
 
     /// Allocates indices in the index buffer.
+    ///
+    /// The function is thread-safe and can be called from multiple threads simultaneously and
+    /// in parallel with other thread-safe class methods.
     RefCntAutoPtr<IBufferSuballocation> AllocateIndices(Uint32 Size, Uint32 Alignment = 4);
 
     /// Allocates vertices in the vertex pool that matches the specified layout.
@@ -193,101 +205,171 @@ public:
     /// \param[in]  LayoutKey   - Vertex layout key, see VertexLayoutKey.
     /// \param[in]  VertexCount - The number of vertices to allocate.
     ///
-    /// \remarks    If the vertex pool for the given key does not exist and if the default
-    ///             pool description allows creating new pools (VertexCount != 0),
-    ///             new pool will be added.
+    /// If the vertex pool for the given key does not exist and if the default
+    /// pool description allows creating new pools (VertexCount != 0),
+    /// new pool will be added.
     ///
-    ///             If existing pools run out of space, a new vertex pool will be created and
-    ///             vertices will be allocated from this pool.
+    /// If existing pools run out of space, a new vertex pool will be created and
+    /// vertices will be allocated from this pool.
     ///
-    ///             If no pull exists for the given key and the default
-    ///             pool description does not allow creating new pools
-    ///             (VertexCount == 0), the function returns null.
+    /// If no pull exists for the given key and the default
+    /// pool description does not allow creating new pools
+    /// (VertexCount == 0), the function returns null.
+    ///
+    /// The function is thread-safe and can be called from multiple threads simultaneously and
+    /// in parallel with other thread-safe class methods.
     RefCntAutoPtr<IVertexPoolAllocation> AllocateVertices(const VertexLayoutKey& LayoutKey, Uint32 VertexCount);
 
 
     /// Returns the combined texture atlas version, i.e. the sum of the texture versions of all
     /// atlases.
+    ///
+    /// The function is thread-safe and can be called from multiple threads simultaneously and
+    /// in parallel with other thread-safe class methods.
     Uint32 GetTextureVersion() const;
 
     /// Returns the index buffer version.
+    ///
+    /// The function is thread-safe and can be called from multiple threads simultaneously and
+    /// in parallel with other thread-safe class methods.
     Uint32 GetIndexBufferVersion() const;
 
     /// Returns the combined vertex pool version, i.e. the sum all vertex pool versions.
+    ///
+    /// The function is thread-safe and can be called from multiple threads simultaneously and
+    /// in parallel with other thread-safe class methods.
     Uint32 GetVertexPoolsVersion() const;
 
     /// Updates the index buffer, if necessary.
+    ///
+    /// The function is not thread-safe, but can be called in parallel
+    /// with other thread-safe class methods.
     IBuffer* UpdateIndexBuffer(IRenderDevice* pDevice, IDeviceContext* pContext, Uint32 Index = 0);
 
     /// Updates all index buffers.
+    ///
+    /// The function is not thread-safe, but can be called in parallel
+    /// with other thread-safe class methods.
     void UpdateIndexBuffers(IRenderDevice* pDevice, IDeviceContext* pContext);
 
     /// Returns the number of index buffers.
+    ///
+    /// The function is thread-safe and can be called from multiple threads simultaneously and
+    /// in parallel with other thread-safe class methods.
     size_t GetIndexBufferCount() const;
 
     /// Returns the index allocator index.
+    ///
+    /// The function is thread-safe and can be called from multiple threads simultaneously and
+    /// in parallel with other thread-safe class methods.
     Uint32 GetIndexAllocatorIndex(IBufferSuballocator* pAllocator) const;
 
     /// Updates the vertex buffers, if necessary.
+    ///
+    /// The function is not thread-safe, but can be called in parallel
+    /// with other thread-safe class methods.
     void UpdateVertexBuffers(IRenderDevice* pDevice, IDeviceContext* pContext);
 
     /// Returns a pointer to the index buffer.
+    ///
+    /// The function is thread-safe and can be called from multiple threads simultaneously and
+    /// in parallel with other thread-safe class methods.
     IBuffer* GetIndexBuffer(Uint32 Index = 0) const;
 
     /// Returns a pointer to the vertex pool for the given key and index.
     /// If the pool does not exist, null is returned.
     ///
-    /// \remarks    If multiple vertex pools with the same key may exist,
-    ///             an application can use the GetVertexPools() method to
-    ///             get all pools for the given key.
+    /// If multiple vertex pools with the same key may exist,
+    /// an application can use the GetVertexPools() method to
+    /// get all pools for the given key.
+    ///
+    /// The function is thread-safe and can be called from multiple threads simultaneously and
+    /// in parallel with other thread-safe class methods.
     IVertexPool* GetVertexPool(const VertexLayoutKey& Key, Uint32 Index = 0);
 
     /// Returns the number of vertex pools for the given key.
+    ///
+    /// The function is thread-safe and can be called from multiple threads simultaneously and
+    /// in parallel with other thread-safe class methods.
     size_t GetVertexPoolCount(const VertexLayoutKey& Key) const;
 
     /// Returns all vertex pools for the given key.
+    ///
+    /// The function is thread-safe and can be called from multiple threads simultaneously and
+    /// in parallel with other thread-safe class methods.
     std::vector<IVertexPool*> GetVertexPools(const VertexLayoutKey& Key) const;
 
     /// Returns index of the vertex pool with the give key.
     /// If the pool does not exist, InvalidIndex (0xFFFFFFFF) is returned.
+    ///
+    /// The function is thread-safe and can be called from multiple threads simultaneously and
+    /// in parallel with other thread-safe class methods.
     Uint32 GetVertexPoolIndex(const VertexLayoutKey& Key, IVertexPool* pPool) const;
 
     /// Updates the atlas texture for the given format.
     /// If the atlas does not exist, null is returned.
+    ///
+    /// The function is not thread-safe, but can be called in parallel
+    /// with other thread-safe class methods.
     ITexture* UpdateTexture(TEXTURE_FORMAT Fmt, IRenderDevice* pDevice, IDeviceContext* pContext);
 
     /// Updates all atlas textures.
+    ///
+    /// The function is not thread-safe, but can be called in parallel
+    /// with other thread-safe class methods.
     void UpdateTextures(IRenderDevice* pDevice, IDeviceContext* pContext);
 
     /// Returns the atlas texture for the given format.
     /// If the atlas does not exist, null is returned.
+    ///
+    /// The function is thread-safe and can be called from multiple threads simultaneously and
+    /// in parallel with other thread-safe class methods.
     ITexture* GetTexture(TEXTURE_FORMAT Fmt) const;
 
     /// Updates all vertex buffers, index buffer and atlas textures.
     ///
-    /// \remarks    This method is equivalent to calling UpdateIndexBuffer(),
-    ///             UpdateVertexBuffers() and UpdateTextures().
+    /// This method is equivalent to calling UpdateIndexBuffer(),
+    /// UpdateVertexBuffers() and UpdateTextures().
+    ///
+    /// The function is not thread-safe, but can be called in parallel
+    /// with other thread-safe class methods.
     void UpdateAllResources(IRenderDevice* pDevice, IDeviceContext* pContext);
 
+    /// Returns the texture atlas description for the given format.
     // NB: can't return reference here!
+    ///
+    /// The function is thread-safe and can be called from multiple threads simultaneously and
+    /// in parallel with other thread-safe class methods.
     TextureDesc GetAtlasDesc(TEXTURE_FORMAT Fmt);
 
     /// Returns the texture atlas allocation alignment for the given format.
+    ///
+    /// The function is thread-safe and can be called from multiple threads simultaneously and
+    /// in parallel with other thread-safe class methods.
     Uint32 GetAllocationAlignment(TEXTURE_FORMAT Fmt, Uint32 Width, Uint32 Height);
 
     /// Returns the index buffer usage stats.
+    ///
+    /// The function is thread-safe and can be called from multiple threads simultaneously and
+    /// in parallel with other thread-safe class methods.
     BufferSuballocatorUsageStats GetIndexBufferUsageStats();
 
     /// Returns the texture atlas usage stats.
-    ///
-    /// If fmt is not TEX_FORMAT_UNKNOWN, returns the stats for the atlas matching the specified format.
+
+    /// If `fmt` is not Diligent::TEX_FORMAT_UNKNOWN, returns the stats for the atlas matching the specified format.
     /// Otherwise, returns the net usage stats for all atlases.
+    ///
+    /// The function is thread-safe and can be called from multiple threads simultaneously and
+    /// in parallel with other thread-safe class methods.
     DynamicTextureAtlasUsageStats GetAtlasUsageStats(TEXTURE_FORMAT Fmt = TEX_FORMAT_UNKNOWN);
 
     /// Returns the vertex pool usage stats.
-    ///
+
     /// If the key is not equal the default key, returns the stats for the vertex pool matching the key.
     /// Otherwise, returns the net usage stats for all pools.
+    ///
+    /// The function is thread-safe and can be called from multiple threads simultaneously and
+    /// in parallel with other thread-safe class methods.
     VertexPoolUsageStats GetVertexPoolUsageStats(const VertexLayoutKey& Key = VertexLayoutKey{});
 
     /// Parameters of the TransitionResourceStates() method.
@@ -300,16 +382,16 @@ public:
             RESOURCE_STATE OldState = RESOURCE_STATE_UNKNOWN;
 
             /// New state that is passed to the NewState member of the StateTransitionDesc structure.
-            ///
-            /// If NewState is RESOURCE_STATE_UNKNOWN, the vertex buffers states will not be changed.
+
+            /// If `NewState` is Diligent::RESOURCE_STATE_UNKNOWN, the vertex buffers states will not be changed.
             RESOURCE_STATE NewState = RESOURCE_STATE_UNKNOWN;
 
             /// Flags that are passed to the Flags member of the StateTransitionDesc structure.
             STATE_TRANSITION_FLAGS Flags = STATE_TRANSITION_FLAG_UPDATE_STATE;
 
             /// Whether to update vertex buffers.
-            ///
-            /// \remarks    Setting this flag to true is equivalent to calling UpdateVertexBuffers().
+
+            /// Setting this flag to true is equivalent to calling UpdateVertexBuffers().
             bool Update = true;
         } VertexBuffers;
 
@@ -320,16 +402,16 @@ public:
             RESOURCE_STATE OldState = RESOURCE_STATE_UNKNOWN;
 
             /// New state that is passed to the NewState member of the StateTransitionDesc structure.
-            ///
-            /// If NewState is RESOURCE_STATE_UNKNOWN, the index buffer state will not be changed.
+
+            /// If `NewState` is Diligent::RESOURCE_STATE_UNKNOWN, the index buffer state will not be changed.
             RESOURCE_STATE NewState = RESOURCE_STATE_UNKNOWN;
 
             /// Flags that are passed to the Flags member of the StateTransitionDesc structure.
             STATE_TRANSITION_FLAGS Flags = STATE_TRANSITION_FLAG_UPDATE_STATE;
 
             /// Whether to update the index buffer.
-            ///
-            /// \remarks	Setting this flag to true is equivalent to calling UpdateIndexBuffer().
+
+            /// Setting this flag to true is equivalent to calling UpdateIndexBuffer().
             bool Update = true;
         } IndexBuffer;
 
@@ -340,30 +422,33 @@ public:
             RESOURCE_STATE OldState = RESOURCE_STATE_UNKNOWN;
 
             /// New state that is passed to the NewState member of the StateTransitionDesc structure.
-            ///
-            /// If NewState is RESOURCE_STATE_UNKNOWN, the texture atlases states will not be changed.
+
+            /// If `NewState` is Diligent::RESOURCE_STATE_UNKNOWN, the texture atlases states will not be changed.
             RESOURCE_STATE NewState = RESOURCE_STATE_UNKNOWN;
 
             /// Flags that are passed to the Flags member of the StateTransitionDesc structure.
             STATE_TRANSITION_FLAGS Flags = STATE_TRANSITION_FLAG_UPDATE_STATE;
 
             /// Whether to update texture atlases.
-            ///
-            /// \remarks	Setting this flag to true is equivalent to calling UpdateTextures().
+
+            /// Setting this flag to true is equivalent to calling UpdateTextures().
             bool Update = true;
         } TextureAtlases;
     };
 
     /// Transitions resource states of all vertex buffers, index buffer and texture atlases.
-    ///
+
     /// \param[in]  pDevice  - Pointer to the render device.
     /// \param[in]  pContext - Pointer to the device context.
     /// \param[in]  Info     - Resource state transition info, see Diligent::ResourceManager::TransitionResourceStatesInfo.
     ///
-    /// \remarks    This function is thread-safe.
+    /// This function is not thread-safe, but can be called in parallel with other thread-safe class methods.
     void TransitionResourceStates(IRenderDevice* pDevice, IDeviceContext* pContext, const TransitionResourceStatesInfo& Info);
 
     /// Returns the formats of the allocated texture atlases.
+    ///
+    /// The function is thread-safe and can be called from multiple threads simultaneously and
+    /// in parallel with other thread-safe class methods.
     std::vector<TEXTURE_FORMAT> GetAllocatedAtlasFormats() const;
 
 private:
@@ -377,6 +462,10 @@ private:
     RefCntAutoPtr<IVertexPool>         CreateVertexPoolForLayout(const VertexLayoutKey& Key) const;
     RefCntAutoPtr<IBufferSuballocator> CreateIndexBufferAllocator(IRenderDevice* pDevice) const;
 
+    std::vector<IDynamicTextureAtlas*>& GetAtlasSnapshot();
+    std::vector<IVertexPool*>&          GetVertexPoolSnapshot();
+    std::vector<IBufferSuballocator*>&  GetIndexAllocatorSnapshot();
+
 private:
     const RENDER_DEVICE_TYPE m_DeviceType;
 
@@ -388,22 +477,40 @@ private:
 
     const BufferSuballocatorCreateInfo m_IndexAllocatorCI;
 
-    mutable std::mutex                              m_IndexAllocatorsMtx;
+    mutable std::shared_mutex                       m_IndexAllocatorsMtx;
     std::vector<RefCntAutoPtr<IBufferSuballocator>> m_IndexAllocators;
 
     std::unordered_map<VertexLayoutKey, VertexPoolCreateInfoX, VertexLayoutKey::Hasher> m_VertexPoolCIs;
 
     using VertexPoolsHashMapType = std::unordered_map<VertexLayoutKey, std::vector<RefCntAutoPtr<IVertexPool>>, VertexLayoutKey::Hasher>;
-    mutable std::mutex     m_VertexPoolsMtx;
-    VertexPoolsHashMapType m_VertexPools;
+    mutable std::shared_mutex m_VertexPoolsMtx;
+    VertexPoolsHashMapType    m_VertexPools;
 
     using AtlasesHashMapType = std::unordered_map<TEXTURE_FORMAT, RefCntAutoPtr<IDynamicTextureAtlas>, std::hash<Uint32>>;
-    mutable std::mutex m_AtlasesMtx;
-    AtlasesHashMapType m_Atlases;
+    mutable std::shared_mutex m_AtlasesMtx;
+    AtlasesHashMapType        m_Atlases;
 
-    using TexAllocationsHashMapType = std::unordered_map<std::string, RefCntWeakPtr<ITextureAtlasSuballocation>>;
-    std::mutex                m_TexAllocationsMtx;
-    TexAllocationsHashMapType m_TexAllocations;
+    // NB: since we never remove resources, we can safely use raw pointers.
+    std::vector<IDynamicTextureAtlas*> m_AtlasSnapshot;
+    std::vector<IVertexPool*>          m_VertexPoolSnapshot;
+    std::vector<IBufferSuballocator*>  m_IndexAllocatorSnapshot;
+
+    class TexAllocations
+    {
+    public:
+        RefCntAutoPtr<ITextureAtlasSuballocation> Find(const char* CacheId);
+
+        void Add(const char* CacheId, RefCntAutoPtr<ITextureAtlasSuballocation> pSuballocation);
+
+        static size_t GetShardIndex(const char* CacheId, size_t ShardCount);
+
+    private:
+        using TexAllocationsHashMapType = std::unordered_map<std::string, RefCntWeakPtr<ITextureAtlasSuballocation>>;
+
+        std::shared_mutex         m_Mtx;
+        TexAllocationsHashMapType m_Map;
+    };
+    std::vector<TexAllocations> m_TexAllocations;
 
     std::vector<StateTransitionDesc> m_Barriers;
 };

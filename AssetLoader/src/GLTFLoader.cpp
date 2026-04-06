@@ -1,5 +1,5 @@
 /*
- *  Copyright 2019-2025 Diligent Graphics LLC
+ *  Copyright 2019-2026 Diligent Graphics LLC
  *  Copyright 2015-2019 Egor Yusov
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
@@ -29,6 +29,7 @@
 #include <memory>
 #include <cmath>
 #include <limits>
+#include <atomic>
 
 #include "GLTFLoader.hpp"
 #include "MapHelper.hpp"
@@ -384,6 +385,8 @@ struct TextureInitData : public ObjectBase<IObject>
 
     RefCntAutoPtr<ITexture> pStagingTex;
 
+    std::atomic<Uint32> NumPendingUploads{0};
+
     void GenerateMipLevels(Uint32 StartMipLevel)
     {
         VERIFY_EXPR(StartMipLevel > 0);
@@ -724,9 +727,126 @@ float Model::GetTextureAlphaCutoffValue(int TextureIndex) const
     return std::max(AlphaCutoff, 0.f);
 }
 
+void ScheduleAtlasUpdate(IRenderDevice*              pDevice,
+                         IGPUUploadManager*          pUploadMgr,
+                         ITextureAtlasSuballocation* pAtlasSuballocation,
+                         ITextureLoader*             pTexLoader,
+                         TextureInitData*            pInitData)
+{
+    const TextureDesc&          SrcTexDesc = pTexLoader->GetTextureDesc();
+    const TextureDesc&          AtlasDesc  = pAtlasSuballocation->GetAtlas()->GetAtlasDesc();
+    const TextureFormatAttribs& FmtAttribs = GetTextureFormatAttribs(SrcTexDesc.Format);
+    const uint2                 Origin     = pAtlasSuballocation->GetOrigin();
+
+    const Uint32 SrcMips = std::min(AtlasDesc.MipLevels, SrcTexDesc.MipLevels);
+    for (Uint32 mip = 0; mip < SrcMips; ++mip)
+    {
+        const MipLevelProperties MipProps = GetMipLevelProperties(SrcTexDesc, mip);
+        if (FmtAttribs.ComponentType == COMPONENT_TYPE_COMPRESSED)
+        {
+            // Do not copy mip levels that are smaller than the block size
+            if (MipProps.LogicalWidth < FmtAttribs.BlockWidth ||
+                MipProps.LogicalHeight < FmtAttribs.BlockHeight)
+                break;
+        }
+
+        const TextureSubResData&  SubResData = pTexLoader->GetSubresourceData(mip);
+        ScheduleTextureUpdateInfo UpdateInfo;
+        UpdateInfo.Format      = AtlasDesc.Format;
+        UpdateInfo.pSrcData    = SubResData.pData;
+        UpdateInfo.Stride      = SubResData.Stride;
+        UpdateInfo.DepthStride = SubResData.DepthStride;
+        UpdateInfo.DstBox      = {0, MipProps.LogicalWidth, 0, MipProps.LogicalHeight};
+        UpdateInfo.DstSlice    = pAtlasSuballocation->GetSlice();
+        UpdateInfo.DstMipLevel = mip;
+
+        UpdateInfo.DstBox.MinX = Origin.x >> mip;
+        UpdateInfo.DstBox.MinY = Origin.y >> mip;
+        UpdateInfo.DstBox.MaxX = UpdateInfo.DstBox.MinX + MipProps.LogicalWidth;
+        UpdateInfo.DstBox.MaxY = UpdateInfo.DstBox.MinY + MipProps.LogicalHeight;
+
+        struct CopyTextureData
+        {
+            RefCntAutoPtr<ITextureAtlasSuballocation> pAtlasSuballocation;
+            RefCntAutoPtr<TextureInitData>            pInitData;
+            RefCntAutoPtr<IRenderDevice>              pDevice;
+        };
+        UpdateInfo.pCopyTextureData = new CopyTextureData{
+            RefCntAutoPtr<ITextureAtlasSuballocation>{pAtlasSuballocation},
+            RefCntAutoPtr<TextureInitData>{pInitData},
+            RefCntAutoPtr<IRenderDevice>{pDevice},
+        };
+        pInitData->NumPendingUploads.fetch_add(1);
+
+        UpdateInfo.CopyTexture =
+            [](IDeviceContext*          pContext,
+               Uint32                   DstMipLevel,
+               Uint32                   DstSlice,
+               const Box&               DstBox,
+               const TextureSubResData& SrcData,
+               void*                    pUserData) {
+                std::unique_ptr<CopyTextureData> CopyData{static_cast<CopyTextureData*>(pUserData)};
+                ITextureAtlasSuballocation*      pAtlasSuballocation = CopyData->pAtlasSuballocation;
+                if (pContext != nullptr)
+                {
+                    ITexture* pAtlasTexture = pAtlasSuballocation->GetAtlas()->Update(CopyData->pDevice, pContext);
+                    pContext->UpdateTexture(pAtlasTexture, DstMipLevel, DstSlice, DstBox, SrcData,
+                                            RESOURCE_STATE_TRANSITION_MODE_VERIFY,
+                                            RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+                }
+                Uint32 PrevNumPendingUploads = CopyData->pInitData->NumPendingUploads.fetch_sub(1);
+                VERIFY_EXPR(PrevNumPendingUploads > 0);
+            };
+
+        UpdateInfo.CopyD3D11Texture =
+            [](IDeviceContext* pContext,
+               Uint32          DstMipLevel,
+               Uint32          DstSlice,
+               const Box&      DstBox,
+               ITexture*       pSrcTexture,
+               Uint32          SrcX,
+               Uint32          SrcY,
+               void*           pUserData) {
+                std::unique_ptr<CopyTextureData> CopyData{static_cast<CopyTextureData*>(pUserData)};
+                ITextureAtlasSuballocation*      pAtlasSuballocation = CopyData->pAtlasSuballocation;
+                if (pContext != nullptr)
+                {
+                    CopyTextureAttribs CopyAttribs;
+                    CopyAttribs.pSrcTexture = pSrcTexture;
+                    CopyAttribs.pDstTexture = pAtlasSuballocation->GetAtlas()->Update(CopyData->pDevice, pContext);
+                    CopyAttribs.DstMipLevel = DstMipLevel;
+                    CopyAttribs.DstSlice    = DstSlice;
+                    CopyAttribs.DstX        = DstBox.MinX;
+                    CopyAttribs.DstY        = DstBox.MinY;
+                    CopyAttribs.DstZ        = DstBox.MinZ;
+
+                    const TextureFormatAttribs& FmtAttribs = GetTextureFormatAttribs(CopyAttribs.pDstTexture->GetDesc().Format);
+
+                    Box SrcBox;
+                    SrcBox.MinX = SrcX;
+                    SrcBox.MinY = SrcY;
+                    SrcBox.MaxX = AlignUp(SrcX + DstBox.Width(), FmtAttribs.BlockWidth);
+                    SrcBox.MaxY = AlignUp(SrcY + DstBox.Height(), FmtAttribs.BlockHeight);
+
+                    CopyAttribs.pSrcBox = &SrcBox;
+
+                    CopyAttribs.SrcTextureTransitionMode = RESOURCE_STATE_TRANSITION_MODE_VERIFY;
+                    CopyAttribs.DstTextureTransitionMode = RESOURCE_STATE_TRANSITION_MODE_TRANSITION;
+
+                    pContext->CopyTexture(CopyAttribs);
+                }
+                Uint32 PrevNumPendingUploads = CopyData->pInitData->NumPendingUploads.fetch_sub(1);
+                VERIFY_EXPR(PrevNumPendingUploads > 0);
+            };
+
+        pUploadMgr->ScheduleTextureUpdate(UpdateInfo);
+    }
+}
+
 Uint32 Model::AddTexture(IRenderDevice*     pDevice,
                          TextureCacheType*  pTextureCache,
                          ResourceManager*   pResourceMgr,
+                         IGPUUploadManager* pUploadMgr,
                          const ImageData&   Image,
                          int                GltfSamplerId,
                          const std::string& CacheId)
@@ -749,25 +869,57 @@ Uint32 Model::AddTexture(IRenderDevice*     pDevice,
         }
         else if (pTextureCache != nullptr)
         {
-            std::lock_guard<std::mutex> Lock{pTextureCache->TexturesMtx};
+            bool TextureExpired = false;
 
-            auto it = pTextureCache->Textures.find(CacheId);
-            if (it != pTextureCache->Textures.end())
+            // First try with shared lock
             {
-                TexInfo.pTexture = it->second.Lock();
-                if (!TexInfo.pTexture)
+                std::shared_lock<std::shared_mutex> SharedLock{pTextureCache->TexturesMtx};
+
+                auto it = pTextureCache->Textures.find(CacheId);
+                if (it != pTextureCache->Textures.end())
                 {
-                    // Image width and height (or pixel_type for dds/ktx) are initialized by LoadImageData()
-                    // if the texture is found in the cache.
-                    if ((Image.Width > 0 && Image.Height > 0) ||
-                        (Image.FileFormat == IMAGE_FILE_FORMAT_DDS || Image.FileFormat == IMAGE_FILE_FORMAT_KTX))
+                    TexInfo.pTexture = it->second.Lock();
+                    if (!TexInfo.pTexture)
                     {
-                        UNEXPECTED("Stale textures should not be found in the texture cache because we hold strong references. "
-                                   "This must be an unexpected effect of loading resources from multiple threads or a bug.");
+                        // Image width and height (or pixel_type for dds/ktx) are initialized by LoadImageData()
+                        // if the texture is found in the cache.
+                        if ((Image.Width > 0 && Image.Height > 0) ||
+                            (Image.FileFormat == IMAGE_FILE_FORMAT_DDS || Image.FileFormat == IMAGE_FILE_FORMAT_KTX))
+                        {
+                            UNEXPECTED("Stale textures should not be found in the texture cache because we hold strong references. "
+                                       "This must be an unexpected effect of loading resources from multiple threads or a bug.");
+                        }
+                        else
+                        {
+                            TextureExpired = true;
+                        }
                     }
-                    else
+                }
+            }
+
+            if (TextureExpired)
+            {
+                // Upgrade to exclusive lock to remove the expried reference
+                std::unique_lock<std::shared_mutex> UniqueLock{pTextureCache->TexturesMtx};
+
+                auto it = pTextureCache->Textures.find(CacheId);
+                if (it != pTextureCache->Textures.end())
+                {
+                    TexInfo.pTexture = it->second.Lock();
+                    if (!TexInfo.pTexture)
                     {
-                        pTextureCache->Textures.erase(it);
+                        // Image width and height (or pixel_type for dds/ktx) are initialized by LoadImageData()
+                        // if the texture is found in the cache.
+                        if ((Image.Width > 0 && Image.Height > 0) ||
+                            (Image.FileFormat == IMAGE_FILE_FORMAT_DDS || Image.FileFormat == IMAGE_FILE_FORMAT_KTX))
+                        {
+                            UNEXPECTED("Stale textures should not be found in the texture cache because we hold strong references. "
+                                       "This must be an unexpected effect of loading resources from multiple threads or a bug.");
+                        }
+                        else
+                        {
+                            pTextureCache->Textures.erase(it);
+                        }
                     }
                 }
             }
@@ -875,9 +1027,16 @@ Uint32 Model::AddTexture(IRenderDevice*     pDevice,
                     // is added to the cache. This is all OK though.
                     TexInfo.pAtlasSuballocation = pResourceMgr->AllocateTextureSpace(TexDesc.Format, TexDesc.Width, TexDesc.Height, CacheId.c_str(), pTexInitData);
 
-                    // NB: create staging texture to save work in the main thread when
-                    //     this function is called from a worker thread
-                    pTexLoader->CreateTexture(pDevice, &pTexInitData->pStagingTex);
+                    if (pUploadMgr != nullptr)
+                    {
+                        ScheduleAtlasUpdate(pDevice, pUploadMgr, TexInfo.pAtlasSuballocation, pTexLoader, pTexInitData);
+                    }
+                    else
+                    {
+                        // NB: create staging texture to save work in the main thread when
+                        //     this function is called from a worker thread
+                        pTexLoader->CreateTexture(pDevice, &pTexInitData->pStagingTex);
+                    }
                 }
             }
         }
@@ -906,7 +1065,7 @@ Uint32 Model::AddTexture(IRenderDevice*     pDevice,
             Level0Stride = Uint64{Level0.Width} * 4;
             Level0.Data.resize(static_cast<size_t>(Level0Stride * TexDesc.Height));
             Level0.SubResData.pData = Level0.Data.data();
-            GenerateCheckerBoardPattern(TexDesc.Width, TexDesc.Height, TexDesc.Format, 4, 4, Level0.Data.data(), Level0Stride);
+            GenerateCheckerBoardPattern(TexDesc.Width, TexDesc.Height, TEX_FORMAT_RGBA8_UNORM, 4, 4, Level0.Data.data(), Level0Stride);
 
             pDevice->CreateTexture(TexDesc, nullptr, &TexInfo.pTexture);
             TexInfo.pTexture->SetUserData(pTexInitData);
@@ -914,8 +1073,21 @@ Uint32 Model::AddTexture(IRenderDevice*     pDevice,
 
         if (TexInfo.pTexture && pTextureCache != nullptr)
         {
-            std::lock_guard<std::mutex> Lock{pTextureCache->TexturesMtx};
-            pTextureCache->Textures.emplace(CacheId, TexInfo.pTexture);
+            std::unique_lock<std::shared_mutex> UniqueLock{pTextureCache->TexturesMtx};
+            auto [it, inserted] = pTextureCache->Textures.emplace(CacheId, TexInfo.pTexture);
+            if (!inserted)
+            {
+                if (auto pCachedTex = it->second.Lock())
+                {
+                    // Use the existing texture
+                    TexInfo.pTexture = pCachedTex;
+                }
+                else
+                {
+                    // Replace the expired weak reference
+                    it->second = TexInfo.pTexture;
+                }
+            }
         }
     }
 
@@ -949,7 +1121,8 @@ void Model::LoadTextures(IRenderDevice*         pDevice,
                          const tinygltf::Model& gltf_model,
                          const std::string&     BaseDir,
                          TextureCacheType*      pTextureCache,
-                         ResourceManager*       pResourceMgr)
+                         ResourceManager*       pResourceMgr,
+                         IGPUUploadManager*     pUploadMgr)
 {
     Textures.reserve(gltf_model.textures.size());
     for (const tinygltf::Texture& gltf_tex : gltf_model.textures)
@@ -966,27 +1139,29 @@ void Model::LoadTextures(IRenderDevice*         pDevice,
         Image.pData         = gltf_image.image.data();
         Image.DataSize      = gltf_image.image.size();
 
-        AddTexture(pDevice, pTextureCache, pResourceMgr, Image, gltf_tex.sampler, CacheId);
+        AddTexture(pDevice, pTextureCache, pResourceMgr, pUploadMgr, Image, gltf_tex.sampler, CacheId);
     }
 }
 
-void Model::PrepareGPUResources(IRenderDevice* pDevice, IDeviceContext* pCtx)
+bool Model::PrepareTextureGPUData(IRenderDevice* pDevice, IDeviceContext* pCtx, std::vector<StateTransitionDesc>& Barriers)
 {
-    if (GPUDataInitialized.load())
-        return;
-
-    std::vector<StateTransitionDesc> Barriers;
-
+    bool AllTexturesReady = true;
     for (Uint32 i = 0; i < Textures.size(); ++i)
     {
-        auto&     DstTexInfo = Textures[i];
-        ITexture* pTexture   = nullptr;
+        TextureInfo& DstTexInfo = Textures[i];
+        ITexture*    pTexture   = nullptr;
 
         RefCntAutoPtr<TextureInitData> pInitData;
         if (DstTexInfo.pAtlasSuballocation)
         {
             pTexture  = DstTexInfo.pAtlasSuballocation->GetAtlas()->Update(pDevice, pCtx);
             pInitData = ClassPtrCast<TextureInitData>(DstTexInfo.pAtlasSuballocation->GetUserData());
+            if (pInitData && pInitData->NumPendingUploads.load() > 0)
+            {
+                // Wait until uploads are scheduled for all mip levels.
+                AllTexturesReady = false;
+                continue;
+            }
             // User data is only set when the allocation is created, so no other
             // thread can call SetUserData() in parallel.
             DstTexInfo.pAtlasSuballocation->SetUserData(nullptr);
@@ -1093,52 +1268,82 @@ void Model::PrepareGPUResources(IRenderDevice* pDevice, IDeviceContext* pCtx)
         }
     }
 
-    if (IndexData.pBuffer || IndexData.pAllocation)
+    return AllTexturesReady;
+}
+
+bool Model::PrepareIndexGPUData(IRenderDevice* pDevice, IDeviceContext* pCtx, std::vector<StateTransitionDesc>& Barriers)
+{
+    if (!IndexData.pBuffer && !IndexData.pAllocation)
+        return true;
+
+    IBuffer* pBuffer = IndexData.pAllocation ?
+        IndexData.pAllocation->Update(pDevice, pCtx) :
+        IndexData.pBuffer;
+
+    if (pBuffer == nullptr)
+        return true;
+
+    RefCntAutoPtr<BufferInitData> pInitData;
+    if (IndexData.pAllocation)
+        pInitData = RefCntAutoPtr<BufferInitData>{IndexData.pAllocation->GetUserData(), IID_BufferInitData};
+    else if (IndexData.pBuffer)
+        pInitData = RefCntAutoPtr<BufferInitData>{IndexData.pBuffer->GetUserData(), IID_BufferInitData};
+
+    bool IndexDataReady = true;
+    if (pInitData)
     {
-        IBuffer* pBuffer = IndexData.pAllocation ?
-            IndexData.pAllocation->Update(pDevice, pCtx) :
-            IndexData.pBuffer;
+        VERIFY_EXPR(pInitData->Chunks.size() == 1);
+        const BufferInitData::ChunkData&      Chunk      = pInitData->Chunks[0];
+        const std::vector<Uint8>&             Bytes      = Chunk.Bytes;
+        const BufferInitData::AsyncCopyStatus CopyStatus = Chunk.CopyStatus;
 
-        if (pBuffer != nullptr)
+        VERIFY_EXPR(Bytes.empty() || (CopyStatus == BufferInitData::AsyncCopyStatus::Disabled));
+        if (CopyStatus == BufferInitData::AsyncCopyStatus::Disabled)
         {
-            RefCntAutoPtr<BufferInitData> pInitData;
-            if (IndexData.pAllocation)
-            {
-                pInitData = RefCntAutoPtr<BufferInitData>{IndexData.pAllocation->GetUserData(), IID_BufferInitData};
-                IndexData.pAllocation->SetUserData(nullptr);
-            }
-            else if (IndexData.pBuffer)
-            {
-                pInitData = RefCntAutoPtr<BufferInitData>{IndexData.pBuffer->GetUserData(), IID_BufferInitData};
-                IndexData.pBuffer->SetUserData(nullptr);
-            }
-
-            if (pInitData)
+            if (!Bytes.empty())
             {
                 const Uint32 Offset = IndexData.pAllocation ? IndexData.pAllocation->GetOffset() : 0;
+                pCtx->UpdateBuffer(pBuffer, Offset, static_cast<Uint32>(Bytes.size()), Bytes.data(), RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+            }
+        }
+        else if (CopyStatus == BufferInitData::AsyncCopyStatus::Pending)
+        {
+            IndexDataReady = false;
+        }
+        else
+        {
+            VERIFY(CopyStatus == BufferInitData::AsyncCopyStatus::Enqueued, "Unexpected copy status");
+        }
 
-                VERIFY_EXPR(pInitData->Data.size() == 1);
-                pCtx->UpdateBuffer(pBuffer, Offset, static_cast<Uint32>(pInitData->Data[0].size()), pInitData->Data[0].data(), RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
-            }
-            if (IndexData.pBuffer != nullptr)
-            {
-                VERIFY_EXPR(IndexData.pBuffer == pBuffer);
-                Barriers.emplace_back(StateTransitionDesc{pBuffer, RESOURCE_STATE_UNKNOWN, RESOURCE_STATE_INDEX_BUFFER, STATE_TRANSITION_FLAG_UPDATE_STATE});
-            }
+        if (IndexDataReady)
+        {
+            if (IndexData.pAllocation)
+                IndexData.pAllocation->SetUserData(nullptr);
+            else if (IndexData.pBuffer)
+                IndexData.pBuffer->SetUserData(nullptr);
         }
     }
 
+    if (IndexDataReady && IndexData.pBuffer != nullptr)
+    {
+        VERIFY_EXPR(IndexData.pBuffer == pBuffer);
+        Barriers.emplace_back(StateTransitionDesc{pBuffer, RESOURCE_STATE_UNKNOWN, RESOURCE_STATE_INDEX_BUFFER, STATE_TRANSITION_FLAG_UPDATE_STATE});
+    }
+
+    return IndexDataReady;
+}
+
+bool Model::PrepareVertexGPUData(IRenderDevice* pDevice, IDeviceContext* pCtx, std::vector<StateTransitionDesc>& Barriers)
+{
+    bool VertexDataReady = true;
     for (Uint32 BuffId = 0; BuffId < GetVertexBufferCount(); ++BuffId)
     {
         IBuffer* pBuffer = nullptr;
         if (VertexData.pAllocation != nullptr)
-        {
             pBuffer = VertexData.pAllocation->Update(BuffId, pDevice, pCtx);
-        }
         else if (BuffId < VertexData.Buffers.size())
-        {
             pBuffer = VertexData.Buffers[BuffId];
-        }
+
         if (pBuffer == nullptr)
             continue;
 
@@ -1146,30 +1351,49 @@ void Model::PrepareGPUResources(IRenderDevice* pDevice, IDeviceContext* pCtx)
         if (VertexData.pAllocation)
         {
             pInitData = RefCntAutoPtr<BufferInitData>{VertexData.pAllocation->GetUserData(), IID_BufferInitData};
-            VERIFY_EXPR(!pInitData || pInitData->Data.size() == GetVertexBufferCount());
+            VERIFY_EXPR(!pInitData || pInitData->Chunks.size() == GetVertexBufferCount());
         }
         else if (VertexData.Buffers[BuffId])
         {
             pInitData = RefCntAutoPtr<BufferInitData>{VertexData.Buffers[BuffId]->GetUserData(), IID_BufferInitData};
-            VertexData.Buffers[BuffId]->SetUserData(nullptr);
-            VERIFY_EXPR(!pInitData || pInitData->Data.size() == 1);
+            VERIFY_EXPR(!pInitData || pInitData->Chunks.size() == 1);
         }
 
+        bool VertexStreamUploaded = true;
         if (pInitData)
         {
-            const Uint32 Offset = VertexData.pAllocation ?
-                VertexData.pAllocation->GetStartVertex() * VertexData.Strides[BuffId] :
-                0;
-
-            const std::vector<Uint8>& Data = VertexData.pAllocation ? pInitData->Data[BuffId] : pInitData->Data[0];
-            if (!Data.empty())
+            const BufferInitData::ChunkData&      Chunk      = VertexData.pAllocation ? pInitData->Chunks[BuffId] : pInitData->Chunks[0];
+            const std::vector<Uint8>&             Bytes      = Chunk.Bytes;
+            const BufferInitData::AsyncCopyStatus CopyStatus = Chunk.CopyStatus;
+            VERIFY_EXPR(Bytes.empty() || (CopyStatus == BufferInitData::AsyncCopyStatus::Disabled));
+            if (CopyStatus == BufferInitData::AsyncCopyStatus::Disabled)
             {
-                pCtx->UpdateBuffer(pBuffer, Offset, static_cast<Uint32>(Data.size()), Data.data(), RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+                if (!Bytes.empty())
+                {
+                    const Uint32 Offset = VertexData.pAllocation ?
+                        VertexData.pAllocation->GetStartVertex() * VertexData.Strides[BuffId] :
+                        0;
+
+                    pCtx->UpdateBuffer(pBuffer, Offset, static_cast<Uint32>(Bytes.size()), Bytes.data(), RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+                }
+            }
+            else if (CopyStatus == BufferInitData::AsyncCopyStatus::Pending)
+            {
+                VertexStreamUploaded = false;
+            }
+            else
+            {
+                VERIFY(CopyStatus == BufferInitData::AsyncCopyStatus::Enqueued, "Unexpected copy status");
             }
         }
 
-        if (!VertexData.Buffers.empty() && VertexData.Buffers[BuffId])
+        if (!VertexStreamUploaded)
+            VertexDataReady = false;
+
+        if (!VertexData.Buffers.empty() && VertexData.Buffers[BuffId] && VertexStreamUploaded)
         {
+            VertexData.Buffers[BuffId]->SetUserData(nullptr);
+
             VERIFY_EXPR(VertexData.Buffers[BuffId] == pBuffer);
             if (pBuffer->GetDesc().BindFlags & BIND_VERTEX_BUFFER)
                 Barriers.emplace_back(StateTransitionDesc{pBuffer, RESOURCE_STATE_UNKNOWN, RESOURCE_STATE_VERTEX_BUFFER, STATE_TRANSITION_FLAG_UPDATE_STATE});
@@ -1177,13 +1401,36 @@ void Model::PrepareGPUResources(IRenderDevice* pDevice, IDeviceContext* pCtx)
                 Barriers.emplace_back(StateTransitionDesc{pBuffer, RESOURCE_STATE_UNKNOWN, RESOURCE_STATE_SHADER_RESOURCE, STATE_TRANSITION_FLAG_UPDATE_STATE});
         }
     }
-    if (VertexData.pAllocation)
+
+    if (VertexData.pAllocation && VertexDataReady)
         VertexData.pAllocation->SetUserData(nullptr);
 
-    if (!Barriers.empty())
-        pCtx->TransitionResourceStates(static_cast<Uint32>(Barriers.size()), Barriers.data());
+    return VertexDataReady;
+}
 
-    GPUDataInitialized.store(true);
+bool Model::PrepareGPUResources(IRenderDevice* pDevice, IDeviceContext* pCtx)
+{
+    if (GPUDataInitialized.load())
+        return true;
+
+    std::vector<StateTransitionDesc> Barriers;
+
+    bool TexturesPrepared   = PrepareTextureGPUData(pDevice, pCtx, Barriers);
+    bool IndexDataPrepared  = PrepareIndexGPUData(pDevice, pCtx, Barriers);
+    bool VertexDataUploaded = PrepareVertexGPUData(pDevice, pCtx, Barriers);
+
+    if (!Barriers.empty())
+    {
+        pCtx->TransitionResourceStates(static_cast<Uint32>(Barriers.size()), Barriers.data());
+    }
+
+    if (TexturesPrepared && IndexDataPrepared && VertexDataUploaded)
+    {
+        GPUDataInitialized.store(true);
+        return true;
+    }
+
+    return false;
 }
 
 void Model::LoadTextureSamplers(IRenderDevice* pDevice, const tinygltf::Model& gltf_model)
@@ -1672,32 +1919,57 @@ bool LoadImageData(tinygltf::Image*     gltf_image,
         {
             TextureCacheType& TexCache = *pLoaderData->pTextureCache;
 
-            std::lock_guard<std::mutex> Lock{TexCache.TexturesMtx};
+            RefCntAutoPtr<ITexture> pTexture;
+            bool                    TextureExpired = false;
 
-            auto it = TexCache.Textures.find(CacheId);
-            if (it != TexCache.Textures.end())
+            // Try with shared lock first
             {
-                if (RefCntAutoPtr<ITexture> pTexture = it->second.Lock())
+                std::shared_lock<std::shared_mutex> SharedLock{TexCache.TexturesMtx};
+
+                auto it = TexCache.Textures.find(CacheId);
+                if (it != TexCache.Textures.end())
                 {
-                    const TextureDesc&          TexDesc    = pTexture->GetDesc();
-                    const TextureFormatAttribs& FmtAttribs = GetTextureFormatAttribs(TexDesc.Format);
-
-                    gltf_image->width      = TexDesc.Width;
-                    gltf_image->height     = TexDesc.Height;
-                    gltf_image->component  = FmtAttribs.NumComponents;
-                    gltf_image->bits       = FmtAttribs.ComponentSize * 8;
-                    gltf_image->pixel_type = TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE;
-
-                    // Keep strong reference to ensure the texture is alive (second time, but that's fine).
-                    pLoaderData->TexturesHold.emplace_back(std::move(pTexture));
-
-                    return true;
+                    pTexture = it->second.Lock();
+                    if (!pTexture)
+                    {
+                        // Texture is stale
+                        TextureExpired = true;
+                    }
                 }
-                else
+            }
+
+            if (TextureExpired)
+            {
+                // Upgrade to exclusive lock to remove stale texture
+                std::unique_lock<std::shared_mutex> UniqueLock{TexCache.TexturesMtx};
+
+                auto it = TexCache.Textures.find(CacheId);
+                if (it != TexCache.Textures.end())
                 {
-                    // Texture is stale - remove it from the cache
-                    TexCache.Textures.erase(it);
+                    pTexture = it->second.Lock();
+                    if (!pTexture)
+                    {
+                        // Remove stale texture from the cache
+                        TexCache.Textures.erase(it);
+                    }
                 }
+            }
+
+            if (pTexture)
+            {
+                const TextureDesc&          TexDesc    = pTexture->GetDesc();
+                const TextureFormatAttribs& FmtAttribs = GetTextureFormatAttribs(TexDesc.Format);
+
+                gltf_image->width      = TexDesc.Width;
+                gltf_image->height     = TexDesc.Height;
+                gltf_image->component  = FmtAttribs.NumComponents;
+                gltf_image->bits       = FmtAttribs.ComponentSize * 8;
+                gltf_image->pixel_type = TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE;
+
+                // Keep strong reference to ensure the texture is alive (second time, but that's fine).
+                pLoaderData->TexturesHold.emplace_back(std::move(pTexture));
+
+                return true;
             }
         }
     }
@@ -1829,9 +2101,9 @@ bool FileExists(const std::string& abs_filename, void* user_data)
         }
         else if (pLoaderData->pTextureCache != nullptr)
         {
-            std::lock_guard<std::mutex> Lock{pLoaderData->pTextureCache->TexturesMtx};
+            std::shared_lock<std::shared_mutex> SharedLock{pLoaderData->pTextureCache->TexturesMtx};
 
-            auto it = pLoaderData->pTextureCache->Textures.find(CacheId.c_str());
+            auto it = pLoaderData->pTextureCache->Textures.find(CacheId);
             if (it != pLoaderData->pTextureCache->Textures.end())
                 return true;
         }
@@ -1868,9 +2140,9 @@ bool ReadWholeFile(std::vector<unsigned char>* out,
         }
         else if (pLoaderData->pTextureCache != nullptr)
         {
-            std::lock_guard<std::mutex> Lock{pLoaderData->pTextureCache->TexturesMtx};
+            std::shared_lock<std::shared_mutex> SharedLock{pLoaderData->pTextureCache->TexturesMtx};
 
-            auto it = pLoaderData->pTextureCache->Textures.find(CacheId.c_str());
+            auto it = pLoaderData->pTextureCache->Textures.find(CacheId);
             if (it != pLoaderData->pTextureCache->Textures.end())
             {
                 if (RefCntAutoPtr<ITexture> pTexture = it->second.Lock())
@@ -1978,7 +2250,7 @@ void Model::LoadFromFile(IRenderDevice*         pDevice,
     // Load materials first as the LoadTextures() function needs them to determine the alpha-cut value.
     LoadMaterials(gltf_model, CI.MaterialLoadCallback);
     LoadTextureSamplers(pDevice, gltf_model);
-    LoadTextures(pDevice, gltf_model, LoaderData.BaseDir, pTextureCache, pResourceMgr);
+    LoadTextures(pDevice, gltf_model, LoaderData.BaseDir, pTextureCache, pResourceMgr, CI.pUploadMgr);
 
     ModelBuilder Builder{CI, *this};
     Builder.Execute(TinyGltfModelWrapper{gltf_model}, CI.SceneId, pDevice);
