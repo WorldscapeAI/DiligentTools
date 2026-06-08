@@ -2300,7 +2300,18 @@ static void UpdateNodeGlobalTransform(const Node& node, const float4x4& ParentMa
 {
     const float4x4& LocalMat  = Transforms.NodeLocalMatrices[node.Index];
     float4x4&       GlobalMat = Transforms.NodeGlobalMatrices[node.Index];
-    GlobalMat                 = LocalMat * ParentMatrix;
+
+    if (node.ProceduralAnimSet)
+    {
+        float4x4 prodeduralAnimMat = Transforms.NodeProceduralAnimations[node.Index].Rotation.ToMatrix();
+        GlobalMat                  = prodeduralAnimMat * LocalMat * ParentMatrix;
+    }
+    else
+    {
+        GlobalMat = LocalMat * ParentMatrix;
+
+    }
+
     for (const Node* pChild : node.Children)
     {
         UpdateNodeGlobalTransform(*pChild, GlobalMat, Transforms);
@@ -2324,6 +2335,7 @@ void Model::ComputeTransforms(Uint32           SceneIndex,
     // not the linear node index in the scene.
     Transforms.NodeGlobalMatrices.resize(Nodes.size());
     Transforms.NodeLocalMatrices.resize(Nodes.size());
+    Transforms.NodeProceduralAnimations.resize(Nodes.size());
 
     // Update node animation
     if (AnimationIndex >= 0)
@@ -2334,6 +2346,7 @@ void Model::ComputeTransforms(Uint32           SceneIndex,
     else
     {
         Transforms.Skins.clear();
+
         for (Node* pNode : scene.LinearNodes)
         {
             VERIFY_EXPR(pNode != nullptr);
@@ -2343,7 +2356,9 @@ void Model::ComputeTransforms(Uint32           SceneIndex,
 
     // Compute global transforms
     for (Node* pRoot : scene.RootNodes)
+    {
         UpdateNodeGlobalTransform(*pRoot, RootTransform, Transforms);
+    }
 
     // Update join matrices
     if (!Transforms.Skins.empty())
@@ -2397,7 +2412,9 @@ void Model::UpdateAnimation(Uint32 SceneIndex, Uint32 AnimationIndex, float time
 
     const Scene& scene = Scenes[SceneIndex];
     if (Transforms.NodeAnimations.size() != scene.LinearNodes.size())
+    {
         Transforms.NodeAnimations.resize(scene.LinearNodes.size());
+    }
     VERIFY_EXPR(Transforms.NodeAnimations.size() == Transforms.NodeLocalMatrices.size());
 
     for (const Node* pN : scene.LinearNodes)

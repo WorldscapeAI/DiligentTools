@@ -548,6 +548,8 @@ struct Node
     // Index in ModelTransforms.Skins array.
     int SkinTransformsIndex = -1;
 
+    bool ProceduralAnimSet = false;
+
     std::string Name;
 
     const Node* Parent = nullptr;
@@ -919,7 +921,10 @@ struct ModelTransforms
         float3      Scale{1, 1, 1};
         QuaternionF Rotation;
     };
+    // This will get filled in by any keyframe animations that target each node
     std::vector<AnimationTransforms> NodeAnimations;
+    // This will get filled in by any procedural animations that target each node through the API
+    std::vector<AnimationTransforms> NodeProceduralAnimations;
 };
 
 /// GLTF model.
