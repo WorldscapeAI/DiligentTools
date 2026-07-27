@@ -2303,8 +2303,13 @@ static void UpdateNodeGlobalTransform(const Node& node, const float4x4& ParentMa
 
     if (node.ProceduralAnimSet)
     {
-        float4x4 prodeduralAnimMat = Transforms.NodeProceduralAnimations[node.Index].Rotation.ToMatrix();
-        GlobalMat                  = prodeduralAnimMat * LocalMat * ParentMatrix;
+		// from ComputeNodeLocalMatrix: LocalMatrix = S * R * T * M
+		const auto&		anim_transform	= Transforms.NodeProceduralAnimations[node.Index];
+		const float4x4	trans_mat		(float4x4::Translation(anim_transform.Translation));
+		const float4x4	rot_mat			(anim_transform.Rotation.ToMatrix());
+		const float4x4	scale_mat		(float4x4::Scale(anim_transform.Scale));
+		const float4x4	anim_mat		(scale_mat * rot_mat * trans_mat);
+		GlobalMat						= anim_mat * LocalMat * ParentMatrix;
     }
     else
     {
