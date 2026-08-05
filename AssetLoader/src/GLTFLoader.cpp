@@ -2309,7 +2309,7 @@ static void UpdateNodeGlobalTransform(const Node& node, const float4x4& ParentMa
 		const float4x4	rot_mat			(anim_transform.Rotation.ToMatrix());
 		const float4x4	scale_mat		(float4x4::Scale(anim_transform.Scale));
 		const float4x4	anim_mat		(scale_mat * rot_mat * trans_mat);
-		GlobalMat						= anim_mat * LocalMat * ParentMatrix;
+		GlobalMat						= anim_mat * ParentMatrix;
     }
     else
     {
