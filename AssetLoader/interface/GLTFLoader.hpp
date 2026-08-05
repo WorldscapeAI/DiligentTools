@@ -1103,6 +1103,13 @@ struct Model
                       int                GltfSamplerId,
                       const std::string& CacheId);
 
+    Uint32 AddTexture(RefCntAutoPtr<ITexture> Texture)
+    {
+        Textures.emplace_back();
+        Textures.back().pTexture = std::move(Texture);
+        return static_cast<Uint32>(Textures.size() - 1);
+    }
+
     Uint32 GetNumVertexAttributes() const { return NumVertexAttributes; }
     Uint32 GetNumTextureAttributes() const { return NumTextureAttributes; }
 
