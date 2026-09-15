@@ -2350,7 +2350,10 @@ void Model::ComputeTransforms(Uint32           SceneIndex,
     }
     else
     {
-        Transforms.Skins.clear();
+		if(scene.RootNodes.empty() || !scene.RootNodes[0]->ProceduralAnimSet)
+	        Transforms.Skins.clear();
+	    else
+            Transforms.Skins.resize(SkinTransformsCount);
 
         for (Node* pNode : scene.LinearNodes)
         {
