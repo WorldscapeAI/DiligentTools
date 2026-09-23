@@ -1608,7 +1608,8 @@ static void LoadExtensionParameter(const tinygltf::Value& Ext, const char* Name,
     }
 }
 
-void Model::LoadMaterials(const tinygltf::Model& gltf_model, const ModelCreateInfo::MaterialLoadCallbackType& MaterialLoadCallback)
+void Model::LoadMaterials(const tinygltf::Model& gltf_model, const std::string& BaseDir,
+                          const ModelCreateInfo::MaterialLoadCallbackType& MaterialLoadCallback)
 {
     Materials.reserve(gltf_model.materials.size());
     for (const tinygltf::Material& gltf_mat : gltf_model.materials)
@@ -1852,8 +1853,35 @@ void Model::LoadMaterials(const tinygltf::Model& gltf_model, const ModelCreateIn
         MatBuilder.Finalize();
 
         if (MaterialLoadCallback != nullptr)
-            MaterialLoadCallback(&gltf_model, &gltf_mat, Mat);
+        {
+            // Our goal for a callback is generally to harvest this material's data into a descriptor,
+            // so that it can be edited, serialized, and updated during runtime.
+            MaterialSource source;
+            source.Name = gltf_mat.name;
+            source.Textures.reserve(NumTextureAttributes);
+            for (size_t texture_index = 0; texture_index < NumTextureAttributes; ++texture_index)
+            {
+                const TextureAttributeDesc& attribute = GetTextureAttribute(texture_index);
+                const int texture_id = Mat.GetTextureId(attribute.Index);
+                if (texture_id < 0 || texture_id >= static_cast<int>(gltf_model.textures.size()))
+                    continue;
 
+                const tinygltf::Texture& texture = gltf_model.textures[texture_id];
+                if (texture.source < 0 || texture.source >= static_cast<int>(gltf_model.images.size()))
+                    continue;
+
+                const tinygltf::Image& image = gltf_model.images[texture.source];
+                if (image.uri.empty() || image.uri.rfind("data:", 0) == 0)
+                    continue;
+
+                MaterialSourceTexture texture_source;
+                texture_source.Name = attribute.Name;
+                texture_source.URI = (std::filesystem::path{BaseDir} / image.uri).generic_string();
+                texture_source.UVSet = Mat.GetTextureAttrib(attribute.Index).GetUVSelector();
+                source.Textures.push_back(std::move(texture_source));
+            }
+            MaterialLoadCallback(source, Mat);
+        }
         Materials.push_back(std::move(Mat));
     }
 }
@@ -2248,7 +2276,7 @@ void Model::LoadFromFile(IRenderDevice*         pDevice,
     }
 
     // Load materials first as the LoadTextures() function needs them to determine the alpha-cut value.
-    LoadMaterials(gltf_model, CI.MaterialLoadCallback);
+    LoadMaterials(gltf_model, LoaderData.BaseDir, CI.MaterialLoadCallback);
     LoadTextureSamplers(pDevice, gltf_model);
     LoadTextures(pDevice, gltf_model, LoaderData.BaseDir, pTextureCache, pResourceMgr, CI.pUploadMgr);
 
