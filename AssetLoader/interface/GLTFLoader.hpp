@@ -405,6 +405,19 @@ public:
     }
 };
 
+struct MaterialSourceTexture
+{
+    std::string Name;
+    std::string URI;
+    int UVSet = -1;
+};
+
+struct MaterialSource
+{
+    std::string Name;
+    std::vector<MaterialSourceTexture> Textures;
+};
+
 
 struct Primitive
 {
@@ -530,9 +543,6 @@ struct Light
     float Intensity = 1;
 
     // Point and spot lights only.
-    //
-    // Recommended implementation is as follows:
-    //   Attenuation = clamp(1.0 - (Distance / Range)^4, 0, 1) / Distance^2
     float Range = 0;
 
     // Spot light only
@@ -794,7 +804,7 @@ struct ModelCreateInfo
     /// depending on the loader it is using (e.g. `tinygltf::Primitive*`).
     PrimitiveLoadCallbackType PrimitiveLoadCallback = nullptr;
 
-    using MaterialLoadCallbackType = std::function<void(const void* pSrcModel, const void* pSrcMat, Material& DstMat)>;
+    using MaterialLoadCallbackType = std::function<void(const MaterialSource& SrcMat, Material& DstMat)>;
 
     /// Material loading callback function.
 
@@ -804,9 +814,7 @@ struct ModelCreateInfo
     /// \param [in]  pSrcModel - a pointer to the source model.
     /// \param [in]  pSrcMat   - a pointer to the source material.
     /// \param [out] DstMat    - reference to the destination material.
-    ///
-    /// The application should cast `pSrcMat` to the appropriate type
-    /// depending on the loader it is using (e.g. `tinygltf::Material*`).
+    /// The source record intentionally contains loader-neutral material metadata.
     MaterialLoadCallbackType MaterialLoadCallback = nullptr;
 
     using FileExistsCallbackType = std::function<bool(const char* FilePath)>;
@@ -1172,7 +1180,8 @@ private:
                       IGPUUploadManager*     pUploadMgr);
 
     void LoadTextureSamplers(IRenderDevice* pDevice, const tinygltf::Model& gltf_model);
-    void LoadMaterials(const tinygltf::Model& gltf_model, const ModelCreateInfo::MaterialLoadCallbackType& MaterialLoadCallback);
+    void LoadMaterials(const tinygltf::Model& gltf_model, const std::string& BaseDir,
+                       const ModelCreateInfo::MaterialLoadCallbackType& MaterialLoadCallback);
     void UpdateAnimation(Uint32 SceneIndex, Uint32 AnimationIndex, float time, ModelTransforms& Transforms) const;
 
     // Returns the alpha cutoff value for the given texture.
